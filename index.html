@@ -1,18 +1,305 @@
----
-layout: default
----
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Rotating 24-Cell with Projection Options</title>
+  <!-- Import map so that "three" loads from unpkg -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.128.0/build/three.module.js"
+    }
+  }
+  </script>
+  <style>
+    body { margin: 0; overflow: hidden; background: #aaa; color: #ccc; }
+    #controls {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 100;
+      font-family: sans-serif;
+      background: rgba(0,0,0,0.5);
+      padding: 10px;
+      border-radius: 5px;
+    }
+    label { margin-right: 5px; }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <label for="projectionMethod">Projection:</label>
+    <select id="projectionMethod">
+      <option value="perspective" selected>Perspective</option>
+      <option value="orthographic">Orthographic</option>
+      <option value="linearMix">Linear Mix</option>
+      <option value="stereographic">Stereographic</option>
+    </select>
+  </div>
 
-<div class="posts">
-  {% for post in site.posts %}
-    <article class="post">
+  <script type="module">
+    import * as THREE from "three";
 
-      <h1><a href="{{ site.baseurl }}{{ post.url }}">{{ post.title }}</a></h1>
+    // ----- Projection Functions -----
+    // 1. Perspective Projection: d/(d - w) scaling.
+    function perspectiveProjection(v) {
+      const d = 3; // adjust as desired
+      const w = v[3];
+      const factor = d / (d - w);
+      return new THREE.Vector3(v[0] * factor, v[1] * factor, v[2] * factor);
+    }
+    // 2. Orthographic Projection: simply drop w.
+    function orthographicProjection(v) {
+      return new THREE.Vector3(v[0], v[1], v[2]);
+    }
+    // 3. Linear Mix Projection: add a scaled version of w.
+    function linearMixProjection(v) {
+      const scale = 0.5; // adjust scale as desired
+      return new THREE.Vector3(v[0] + scale * v[3], v[1] + scale * v[3], v[2] + scale * v[3]);
+    }
+    // 4. Stereographic Projection: similar to perspective but with a different constant.
+    function stereographicProjection(v) {
+      const d = 2; // adjust as needed
+      const w = v[3];
+      return new THREE.Vector3(v[0] / (d - w), v[1] / (d - w), v[2] / (d - w));
+    }
 
-      <div class="entry">
-        {{ post.excerpt }}
-      </div>
+    // ----- Scene, Camera, Renderer -----
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xaaaaaa);
 
-      <a href="{{ site.baseurl }}{{ post.url }}" class="read-more">Read More</a>
-    </article>
-  {% endfor %}
-</div>
+    const camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.1, 100);
+    camera.position.z = 5;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // ----- Floor (Simple Diffuse Shader) -----
+    const floorVertexShader = `
+      varying vec3 vNormal;
+      void main(){
+         vNormal = normalize(normalMatrix * normal);
+         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `;
+    const floorFragmentShader = `
+      uniform vec3 lightDirection;
+      uniform vec3 floorColor;
+      varying vec3 vNormal;
+      void main(){
+         float intensity = max(dot(vNormal, normalize(lightDirection)), 0.0);
+         gl_FragColor = vec4(floorColor * intensity, 1.0);
+      }
+    `;
+    const floorUniforms = {
+      lightDirection: { value: new THREE.Vector3(0.5, 1, 0.5).normalize() },
+      floorColor: { value: new THREE.Color(0xaaaaaa) }
+    };
+    const floorMaterial = new THREE.ShaderMaterial({
+      vertexShader: floorVertexShader,
+      fragmentShader: floorFragmentShader,
+      uniforms: floorUniforms,
+      side: THREE.DoubleSide
+    });
+    const floorGeometry = new THREE.PlaneGeometry(10, 10);
+    const floorMesh = new THREE.Mesh(floorGeometry, floorMaterial);
+    floorMesh.rotation.x = -Math.PI/2;
+    floorMesh.position.y = -2;
+    scene.add(floorMesh);
+
+    // ----- Lights -----
+    // Use a point light.
+    const pointLight = new THREE.PointLight(0xffffff, 1, 100);
+    pointLight.position.set(5,5,5);
+    scene.add(pointLight);
+    scene.add(new THREE.AmbientLight(0x222222));
+
+    // ----- Define the 24-Cell in 4D -----
+    // 24 vertices: all permutations of (±1, ±1, 0, 0)
+    const originalVertices = [];
+    for (let i = 0; i < 4; i++) {
+      for (let j = i+1; j < 4; j++) {
+        for (let si of [-1, 1]) {
+          for (let sj of [-1, 1]) {
+            let vertex = [0, 0, 0, 0];
+            vertex[i] = si;
+            vertex[j] = sj;
+            originalVertices.push(vertex);
+          }
+        }
+      }
+    }
+
+    // ----- Compute Edges -----
+    // Connect vertices if squared Euclidean distance equals 2.
+    const edges = [];
+    const tol = 1e-6;
+    for (let i = 0; i < originalVertices.length; i++) {
+      for (let j = i+1; j < originalVertices.length; j++) {
+        let dist2 = 0;
+        for (let k = 0; k < 4; k++) {
+          const d = originalVertices[i][k] - originalVertices[j][k];
+          dist2 += d * d;
+        }
+        if (Math.abs(dist2 - 2) < tol) {
+          edges.push([i, j]);
+        }
+      }
+    }
+    // The 24-cell has 96 edges.
+    const numEdges = edges.length;
+    const numVertices = numEdges * 2; // two endpoints per edge
+
+    // ----- Prepare Geometry Data for the Polytope Edges -----
+    const linePositions = new Float32Array(numVertices * 3);
+    const lineSpeeds = new Float32Array(numVertices);
+    const prevLinePositions = new Float32Array(numVertices * 3);
+    const lineGeom = new THREE.BufferGeometry();
+    lineGeom.setAttribute('position', new THREE.BufferAttribute(linePositions, 3));
+    lineGeom.setAttribute('speed', new THREE.BufferAttribute(lineSpeeds, 1));
+
+    // ----- Create a Thick Line Material with a Custom Shader -----
+    // (This code uses Three.js's Line2/LineMaterial system in our earlier examples.)
+    // Here we create a simple ShaderMaterial that overrides the fragment shader.
+    const lineMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        resolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+        nearDist: { value: 1.0 },
+        farDist: { value: 6.0 }
+      },
+      vertexShader: `
+        varying float vCamDist;
+        void main(){
+          vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+          vCamDist = length(mvPosition.xyz);
+          gl_Position = projectionMatrix * mvPosition;
+        }
+      `,
+      fragmentShader: `
+        uniform float nearDist;
+        uniform float farDist;
+        varying float vCamDist;
+        void main(){
+          // Mix blue (for far) and red (for near)
+          float factor = clamp(1.0 - (vCamDist - nearDist) / (farDist - nearDist), 0.0, 1.0);
+          vec3 color = mix(vec3(0.0, 0.0, 1.0), vec3(1.0, 0.0, 0.0), factor);
+          gl_FragColor = vec4(color, 1.0);
+        }
+      `
+    });
+    // For simplicity, we render the edges as simple lines.
+    // (Note: In your original code you used the Line2 system for thick lines.
+    // Here we simply use THREE.Line for clarity on the projection functions.)
+    const polytopeEdges = new THREE.BufferGeometry();
+    polytopeEdges.setAttribute('position', new THREE.BufferAttribute(linePositions, 3));
+    const polytopeLines = new THREE.LineSegments(polytopeEdges, lineMaterial);
+    scene.add(polytopeLines);
+
+    // ----- Create Shadow Geometry (Projected onto the Floor) -----
+    const shadowPositions = new Float32Array(numVertices * 3);
+    const shadowGeom = new THREE.BufferGeometry();
+    shadowGeom.setAttribute('position', new THREE.BufferAttribute(shadowPositions, 3));
+    const shadowMaterial = new THREE.ShaderMaterial({
+      vertexShader: `
+        void main(){
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        void main(){
+          gl_FragColor = vec4(0.0, 0.0, 0.0, 0.5);
+        }
+      `,
+      transparent: true
+    });
+    const shadowLines = new THREE.LineSegments(shadowGeom, shadowMaterial);
+    scene.add(shadowLines);
+
+    // ----- 4D Rotation Helper -----
+    function rotate4d(v, angle, i, j) {
+      const cos = Math.cos(angle);
+      const sin = Math.sin(angle);
+      const a = v[i], b = v[j];
+      v[i] = a * cos - b * sin;
+      v[j] = a * sin + b * cos;
+    }
+
+    // ----- Global: Shadow Projection Direction -----
+    // With the light coming from (0.5, 1, 0.5), the shadow is cast in the opposite direction.
+    const L = new THREE.Vector3(0.5, 1, 0.5).normalize();
+    const shadowDir = L.clone().negate();
+
+    // ----- Animation Loop -----
+    function animate(time) {
+      const t = time * 0.001; // seconds
+      const angle1 = t * 0.5;
+      const angle2 = t * 0.8;
+
+      // Get the current projection method from the drop–down.
+      const projectionChoice = document.getElementById("projectionMethod").value;
+
+      // Rotate and project each 4D vertex into 3D.
+      const projected = [];
+      for (let i = 0; i < originalVertices.length; i++) {
+        let v = originalVertices[i].slice();
+        rotate4d(v, angle1, 0, 3);
+        rotate4d(v, angle2, 1, 2);
+        let p;
+        if (projectionChoice === "perspective") {
+          p = perspectiveProjection(v);
+        } else if (projectionChoice === "orthographic") {
+          p = orthographicProjection(v);
+        } else if (projectionChoice === "linearMix") {
+          p = linearMixProjection(v);
+        } else if (projectionChoice === "stereographic") {
+          p = stereographicProjection(v);
+        } else {
+          p = perspectiveProjection(v);
+        }
+        projected.push(p);
+      }
+      
+      // Update positions for each edge.
+      for (let e = 0; e < numEdges; e++) {
+        const [i, j] = edges[e];
+        const baseIndex = e * 6;
+        // Endpoint 1:
+        linePositions[baseIndex + 0] = projected[i].x;
+        linePositions[baseIndex + 1] = projected[i].y;
+        linePositions[baseIndex + 2] = projected[i].z;
+        // Endpoint 2:
+        linePositions[baseIndex + 3] = projected[j].x;
+        linePositions[baseIndex + 4] = projected[j].y;
+        linePositions[baseIndex + 5] = projected[j].z;
+      }
+      polytopeEdges.attributes.position.needsUpdate = true;
+      
+      // For each edge, compute the shadow positions.
+      for (let e = 0; e < numEdges; e++) {
+        const [i, j] = edges[e];
+        const baseIndex = e * 6;
+        // For each endpoint, project along shadowDir until y = -2.
+        function computeShadow(P) {
+          const t_shadow = (-2 - P.y) / shadowDir.y;
+          return P.clone().add(shadowDir.clone().multiplyScalar(t_shadow));
+        }
+        const SA = computeShadow(projected[i]);
+        const SB = computeShadow(projected[j]);
+        shadowPositions[baseIndex + 0] = SA.x;
+        shadowPositions[baseIndex + 1] = SA.y;
+        shadowPositions[baseIndex + 2] = SA.z;
+        shadowPositions[baseIndex + 3] = SB.x;
+        shadowPositions[baseIndex + 4] = SB.y;
+        shadowPositions[baseIndex + 5] = SB.z;
+      }
+      shadowGeom.attributes.position.needsUpdate = true;
+      
+      renderer.render(scene, camera);
+      requestAnimationFrame(animate);
+    }
+    
+    animate(0);
+  </script>
+</body>
+</html>
